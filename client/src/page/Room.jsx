@@ -95,7 +95,7 @@ const Room = () => {
         const fileName = `${roomID}-${user?.displayName || 'anonymous'}-${timestamp}.webm`;
         formData.append('audio', audioBlob, fileName);
         try {
-            await axios.post('http://localhost:5000/api/upload-audio', formData);
+            await axios.post('https://bit-meet.onrender.com/api/upload-audio', formData);
             if (isChunk) {
                 console.log(`VAD chunk sent successfully: ${fileName}`);
             } else {
@@ -144,7 +144,7 @@ const Room = () => {
     useEffect(() => {
         if (!user) return;
 
-        socket.current = io.connect("http://localhost:5000");
+        socket.current = io.connect("https://bit-meet.onrender.com");
         
         // Listen for new transcript lines from the server
         socket.current.on('new_transcript', (data) => {
@@ -163,7 +163,7 @@ const Room = () => {
                 // Fetch initial transcript history when joining the room
                 const fetchInitialTranscript = async () => {
                     try {
-                        const response = await axios.get(`http://localhost:5000/api/transcript/${roomID}`);
+                        const response = await axios.get(`https://bit-meet.onrender.com/api/transcript/${roomID}`);
                         if (response.data) {
                             const lines = response.data.split('\n').filter(line => line.trim() !== '');
                             setTranscriptLines(lines);
