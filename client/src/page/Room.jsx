@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import axios from "axios";
-// Import icons and other UI components as before
+// Import icons and other UI components
 import { FaRecordVinyl as RecordIcon } from "react-icons/fa";
 import { IoChatboxOutline as ChatIcon } from "react-icons/io5";
 import { VscTriangleDown as DownIcon } from "react-icons/vsc";
@@ -36,8 +36,8 @@ const Room = () => {
     // --- STATE AND REFS ---
     const [loading, setLoading] = useState(true);
     const navigate = useNavigate();
-    const [micOn, setMicOn] = useState(true);
-    const [showChat, setshowChat] = useState(true);
+    const [micOn, setMicOn] = useState(false); // Default OFF
+    const [showChat, setShowChat] = useState(true);
     const [share, setShare] = useState(false);
     const [joinSound] = useState(new Audio(joinSFX));
     const { roomID } = useParams();
@@ -47,12 +47,12 @@ const Room = () => {
     const socket = useRef();
     const peersRef = useRef([]);
     const localStream = useRef();
-    const [videoActive, setVideoActive] = useState(true);
+    const [videoActive, setVideoActive] = useState(false); // Default OFF
     const [msgs, setMsgs] = useState([]);
     const [msgText, setMsgText] = useState("");
     const localVideo = useRef();
     const { user, login } = useAuth();
-    const [particpentsOpen, setParticpentsOpen] = useState(true);
+    const [participantsOpen, setParticipantsOpen] = useState(true);
 
     // Real-time Transcripts State and Ref
     const [transcriptLines, setTranscriptLines] = useState([]);
@@ -70,16 +70,20 @@ const Room = () => {
     const vadRecorderRef = useRef(null);
     const vadAudioChunksRef = useRef([]);
     const [isSpeaking, setIsSpeaking] = useState(false);
-    const [vadThreshold, setVadThreshold] = useState(0.50);
+    const [vadThreshold, setVadThreshold] = useState(0.70);
 
     // --- CALLBACK FUNCTIONS ---
     const sendMessage = (e) => {
         e.preventDefault();
-        if (msgText) {
+        if (msgText.trim()) {
             socket.current.emit("send message", {
                 roomID,
                 from: socket.current.id,
-                user: { id: user.uid, name: user?.displayName, profilePic: user.photoURL },
+                user: { 
+                    id: user.uid, 
+                    name: user?.displayName || "Anonymous", 
+                    profilePic: user.photoURL || "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"
+                },
                 message: msgText.trim(),
             });
         }
@@ -87,13 +91,15 @@ const Room = () => {
     };
 
     const sendAudioToServer = useCallback(async (audioBlob, isChunk = false) => {
-        if (!audioBlob || audioBlob.size < 200) return; // Add size check
+        if (!audioBlob || audioBlob.size < 200) return;
+        
         const formData = new FormData();
         const now = new Date();
         const timestamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}_` +
             `${String(now.getHours()).padStart(2, '0')}-${String(now.getMinutes()).padStart(2, '0')}-${String(now.getSeconds()).padStart(2, '0')}`;
         const fileName = `${roomID}-${user?.displayName || 'anonymous'}-${timestamp}.webm`;
         formData.append('audio', audioBlob, fileName);
+        
         try {
             await axios.post('https://bit-meet.onrender.com/api/upload-audio', formData);
             if (isChunk) {
@@ -116,7 +122,12 @@ const Room = () => {
                 userToSignal,
                 callerID,
                 signal,
-                user: user ? { uid: user?.uid, email: user?.email, name: user?.displayName, photoURL: user?.photoURL } : null,
+                user: user ? { 
+                    uid: user?.uid, 
+                    email: user?.email, 
+                    name: user?.displayName || "Anonymous", 
+                    photoURL: user?.photoURL || "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"
+                } : null,
             });
         });
         return peer;
@@ -127,11 +138,25 @@ const Room = () => {
         peer.on("signal", (signal) => {
             socket.current.emit("returning signal", { signal, callerID });
         });
-        joinSound.play();
+        
+        // Play join sound with error handling
+        try {
+            joinSound.play().catch(e => console.log("Audio play failed:", e));
+        } catch (e) {
+            console.log("Audio play failed:", e);
+        }
+        
         peer.signal(incomingSignal);
         return peer;
     }, [joinSound]);
     
+    // Auto-scroll chat messages
+    useEffect(() => {
+        if (chatScroll.current) {
+            chatScroll.current.scrollTop = chatScroll.current.scrollHeight;
+        }
+    }, [msgs]);
+
     // Auto-scroll the transcript panel
     useEffect(() => {
         if (transcriptScroll.current) {
@@ -139,6 +164,40 @@ const Room = () => {
         }
     }, [transcriptLines]);
 
+    // --- MIC TOGGLE EFFECT ---
+    useEffect(() => {
+        if (localStream.current) {
+            const audioTrack = localStream.current.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = micOn;
+            }
+            
+            // Control VAD based on micOn state
+            if (vadRef.current) {
+                if (micOn) {
+                    vadRef.current.start();
+                } else {
+                    vadRef.current.pause();
+                    setIsSpeaking(false);
+                    // Stop any ongoing VAD recording
+                    if (vadRecorderRef.current?.state === 'recording') {
+                        vadRecorderRef.current.stop();
+                    }
+                    vadRecorderRef.current = null;
+                }
+            }
+        }
+    }, [micOn]);
+
+    // --- VIDEO TOGGLE EFFECT ---
+    useEffect(() => {
+        if (localStream.current) {
+            const videoTrack = localStream.current.getVideoTracks()[0];
+            if (videoTrack) {
+                videoTrack.enabled = videoActive;
+            }
+        }
+    }, [videoActive]);
 
     // --- MAIN useEffect for STREAM, AUDIO PROCESSING, VAD, and WEBRTC ---
     useEffect(() => {
@@ -153,8 +212,14 @@ const Room = () => {
         });
         
         socket.current.on("message", (data) => {
-            const audio = new Audio(msgSFX);
-            if (user?.uid !== data.user.id) audio.play();
+            try {
+                const audio = new Audio(msgSFX);
+                if (user?.uid !== data.user.id) {
+                    audio.play().catch(e => console.log("Audio play failed:", e));
+                }
+            } catch (e) {
+                console.log("Audio play failed:", e);
+            }
             setMsgs((prevMsgs) => [...prevMsgs, { send: user?.uid === data.user.id, ...data }]);
         });
 
@@ -177,18 +242,36 @@ const Room = () => {
                 // 1. Get raw media stream from device
                 const rawStream = await navigator.mediaDevices.getUserMedia({
                     video: true,
-                    audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+                    audio: { 
+                        sampleRate: 16000, 
+                        channelCount: 1, 
+                        echoCancellation: true, 
+                        noiseSuppression: true, 
+                        autoGainControl: true 
+                    },
                 });
 
                 // 2. Setup AudioContext and the core processing pipeline
-                if (!audioContextRef.current) audioContextRef.current = new AudioContext({ sampleRate: 16000 });
+                if (!audioContextRef.current) {
+                    audioContextRef.current = new AudioContext({ sampleRate: 16000 });
+                }
                 const audioContext = audioContextRef.current;
+                
+                // Resume audio context if suspended
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+                
                 const source = audioContext.createMediaStreamSource(rawStream);
                 
                 const highpassFilter = audioContext.createBiquadFilter();
-                highpassFilter.type = 'highpass'; highpassFilter.frequency.value = 80;
+                highpassFilter.type = 'highpass'; 
+                highpassFilter.frequency.value = 80;
+                
                 const compressor = audioContext.createDynamicsCompressor();
-                compressor.threshold.value = -40; compressor.knee.value = 30; compressor.ratio.value = 12;
+                compressor.threshold.value = -40; 
+                compressor.knee.value = 30; 
+                compressor.ratio.value = 12;
                 
                 const finalStreamDestination = audioContext.createMediaStreamDestination();
 
@@ -239,31 +322,51 @@ const Room = () => {
                     finalStreamDestination.stream.getAudioTracks()[0]
                 ]);
 
+                // Set the initial tracks state based on default settings (both OFF)
+                const audioTrack = finalStream.getAudioTracks()[0];
+                const videoTrack = finalStream.getVideoTracks()[0];
+                if (audioTrack) audioTrack.enabled = micOn;
+                if (videoTrack) videoTrack.enabled = videoActive;
+
                 localStream.current = finalStream;
                 if (localVideo.current) localVideo.current.srcObject = finalStream;
                 setLoading(false);
                 
+                // Don't start VAD initially since mic is off by default
                 if (micOn) myVAD.start();
 
                 // 6. Setup WebRTC and Socket.IO with the final, clean stream
                 socket.current.emit("join room", {
                     roomID,
-                    user: user ? { uid: user?.uid, email: user?.email, name: user?.displayName, photoURL: user?.photoURL } : null,
+                    user: user ? { 
+                        uid: user?.uid, 
+                        email: user?.email, 
+                        name: user?.displayName || "Anonymous", 
+                        photoURL: user?.photoURL || "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"
+                    } : null,
                 });
                 
                 socket.current.on("all users", (users) => {
-                    const newPeers = users.map(peerData => {
+                    const newPeers = [];
+                    const newPeersRef = [];
+                    
+                    users.forEach(peerData => {
                         const peer = createPeer(peerData.userId, socket.current.id, finalStream);
-                        peersRef.current.push({ peerID: peerData.userId, peer, user: peerData.user });
-                        return { peerID: peerData.userId, peer, user: peerData.user };
+                        const peerObj = { peerID: peerData.userId, peer, user: peerData.user };
+                        newPeers.push(peerObj);
+                        newPeersRef.push(peerObj);
                     });
+                    
+                    peersRef.current = newPeersRef;
                     setPeers(newPeers);
                 });
 
                 socket.current.on("user joined", (payload) => {
                     const peer = addPeer(payload.signal, payload.callerID, finalStream);
-                    peersRef.current.push({ peerID: payload.callerID, peer, user: payload.user });
-                    setPeers((prevPeers) => [...prevPeers, { peerID: payload.callerID, peer, user: payload.user }]);
+                    const newPeerObj = { peerID: payload.callerID, peer, user: payload.user };
+                    
+                    peersRef.current = [...peersRef.current, newPeerObj];
+                    setPeers(prevPeers => [...prevPeers, newPeerObj]);
                 });
 
                 socket.current.on("receiving returned signal", (payload) => {
@@ -272,9 +375,17 @@ const Room = () => {
                 });
 
                 socket.current.on("user left", (id) => {
-                    new Audio(leaveSFX).play();
+                    try {
+                        new Audio(leaveSFX).play().catch(e => console.log("Audio play failed:", e));
+                    } catch (e) {
+                        console.log("Audio play failed:", e);
+                    }
+                    
                     const peerObj = peersRef.current.find((p) => p.peerID === id);
-                    if (peerObj) peerObj.peer.destroy();
+                    if (peerObj) {
+                        peerObj.peer.destroy();
+                    }
+                    
                     const newPeers = peersRef.current.filter((p) => p.peerID !== id);
                     peersRef.current = newPeers;
                     setPeers(newPeers);
@@ -291,15 +402,24 @@ const Room = () => {
 
         // 7. Cleanup function
         return () => {
-            if (vadRef.current) { vadRef.current.destroy(); vadRef.current = null; }
-            if (localStream.current) { localStream.current.getTracks().forEach(track => track.stop()); }
-            if (audioContextRef.current?.state !== 'closed') { audioContextRef.current.close(); audioContextRef.current = null; }
-            if (socket.current) { socket.current.disconnect(); }
+            if (vadRef.current) { 
+                vadRef.current.destroy(); 
+                vadRef.current = null; 
+            }
+            if (localStream.current) { 
+                localStream.current.getTracks().forEach(track => track.stop()); 
+            }
+            if (audioContextRef.current?.state !== 'closed') { 
+                audioContextRef.current.close(); 
+                audioContextRef.current = null; 
+            }
+            if (socket.current) { 
+                socket.current.disconnect(); 
+            }
             peersRef.current.forEach(p => p.peer.destroy());
             peersRef.current = [];
         };
-    }, [user, roomID, joinSound, addPeer, createPeer, vadThreshold, sendAudioToServer, micOn]);
-
+    }, [user, roomID, joinSound, addPeer, createPeer, vadThreshold, sendAudioToServer, micOn, videoActive]);
 
     // --- MANUAL RECORDING HANDLERS ---
     const handleStartRecording = () => {
@@ -337,6 +457,33 @@ const Room = () => {
         }
     };
 
+    // Toggle functions
+    const toggleMic = () => {
+        setMicOn(prev => !prev);
+    };
+
+    const toggleVideo = () => {
+        setVideoActive(prev => !prev);
+    };
+
+    const handleLeaveRoom = () => {
+        // Clean disconnect
+        if (socket.current) {
+            socket.current.emit("leave room", roomID);
+        }
+        navigate("/");
+        window.location.reload();
+    };
+
+    const copyToClipboard = () => {
+        navigator.clipboard.writeText(window.location.href).then(() => {
+            // You could add a toast notification here
+            console.log("URL copied to clipboard");
+        }).catch(err => {
+            console.error("Failed to copy URL:", err);
+        });
+    };
+
     // --- RENDER ---
     return (
         <>
@@ -347,371 +494,347 @@ const Room = () => {
                             <Loading />
                         </div>
                     ) : (
-                        user && (
+                        <motion.div
+                            layout
+                            className="flex flex-row bg-darkBlue2 text-white w-full h-screen"
+                        >
                             <motion.div
                                 layout
-                                className="flex flex-row bg-darkBlue2 text-white w-full"
+                                className="flex flex-col bg-darkBlue2 justify-between w-full"
                             >
-                                <motion.div
-                                    layout
-                                    className="flex flex-col bg-darkBlue2 justify-between w-full"
+                                <div
+                                    className="flex-shrink-0 overflow-y-scroll p-3"
+                                    style={{
+                                        height: "calc(100vh - 64px)",
+                                    }}
                                 >
-                                    <div
-                                        className="flex-shrink-0 overflow-y-scroll p-3"
-                                        style={{
-                                            height: "calc(100vh - 64px)",
-                                        }}
+                                    <motion.div
+                                        layout
+                                        className={`grid grid-cols-1 gap-4 ${showChat
+                                                ? "md:grid-cols-2"
+                                                : "lg:grid-cols-3 sm:grid-cols-2"
+                                            }`}
                                     >
                                         <motion.div
                                             layout
-                                            className={`grid grid-cols-1 gap-4  ${showChat
-                                                    ? "md:grid-cols-2"
-                                                    : "lg:grid-cols-3 sm:grid-cols-2"
-                                                } `}
+                                            className={`relative bg-lightGray rounded-lg aspect-video overflow-hidden ${pin &&
+                                                "md:col-span-2 md:row-span-2 md:col-start-1 md:row-start-1"
+                                                }`}
                                         >
-                                            <motion.div
-                                                layout
-                                                className={`relative bg-lightGray rounded-lg aspect-video overflow-hidden ${pin &&
-                                                    "md:col-span-2 md:row-span-2 md:col-start-1 md:row-start-1"
-                                                    }`}
-                                            >
-                                                <div className="absolute top-4 right-4 z-20">
-                                                    <button
-                                                        className={`${pin
-                                                                ? "bg-blue border-transparent"
-                                                                : "bg-slate-800/70 backdrop-blur border-gray"
-                                                            } md:border-2 border-[1px] aspect-square md:p-2.5 p-1.5 cursor-pointer md:rounded-xl rounded-lg text-white md:text-xl text-lg`}
-                                                        onClick={() => setPin(!pin)}
-                                                    >
-                                                        {pin ? <PinActiveIcon /> : <PinIcon />}
-                                                    </button>
-                                                </div>
+                                            <div className="absolute top-4 right-4 z-20">
+                                                <button
+                                                    className={`${pin
+                                                            ? "bg-blue border-transparent"
+                                                            : "bg-slate-800/70 backdrop-blur border-gray"
+                                                        } md:border-2 border-[1px] aspect-square md:p-2.5 p-1.5 cursor-pointer md:rounded-xl rounded-lg text-white md:text-xl text-lg`}
+                                                    onClick={() => setPin(!pin)}
+                                                >
+                                                    {pin ? <PinActiveIcon /> : <PinIcon />}
+                                                </button>
+                                            </div>
 
+                                            {videoActive ? (
                                                 <video
                                                     ref={localVideo}
                                                     muted
                                                     autoPlay
+                                                    playsInline
                                                     controls={false}
                                                     className="h-full w-full object-cover rounded-lg"
                                                 />
-                                                {!videoActive && (
-                                                    <div className="absolute top-0 left-0 bg-lightGray h-full w-full flex items-center justify-center">
-                                                        <img
-                                                            className="h-[35%] max-h-[150px] w-auto rounded-full aspect-square object-cover"
-                                                            src={user?.photoURL}
-                                                            alt={user?.displayName}
-                                                        />
-                                                    </div>
-                                                )}
-                                                <div className="absolute bottom-4 left-4 flex flex-col gap-y-1">
-                                                    <div className="bg-slate-800/70 backdrop-blur border-gray border-2  py-1 px-3 cursor-pointer rounded-md text-white text-xs">
-                                                        {user?.displayName}
-                                                    </div>
-                                                    <div className={`text-xs font-bold py-0.5 px-2 rounded-full w-fit ${isSpeaking ? 'bg-green-500 text-white' : 'bg-black/50 text-gray-300'}`}>
-                                                        VAD: {isSpeaking ? 'SPEAKING' : 'IDLE'}
-                                                    </div>
+                                            ) : (
+                                                <div className="absolute top-0 left-0 bg-lightGray h-full w-full flex items-center justify-center">
+                                                    <img
+                                                        className="h-[35%] max-h-[150px] w-auto rounded-full aspect-square object-cover"
+                                                        src={user?.photoURL || "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"}
+                                                        alt={user?.displayName || "Anonymous"}
+                                                    />
                                                 </div>
-                                            </motion.div>
-                                            {peers.map((peer) => (
-                                                <MeetGridCard
-                                                    key={peer?.peerID}
-                                                    user={peer.user}
-                                                    peer={peer?.peer}
-                                                />
-                                            ))}
+                                            )}
+                                            
+                                            <div className="absolute bottom-4 left-4 flex flex-col gap-y-1">
+                                                <div className="bg-slate-800/70 backdrop-blur border-gray border-2 py-1 px-3 cursor-pointer rounded-md text-white text-xs">
+                                                    {user?.displayName || "Anonymous"}
+                                                </div>
+                                                <div className={`text-xs font-bold py-0.5 px-2 rounded-full w-fit ${isSpeaking ? 'bg-green-500 text-white' : 'bg-black/50 text-gray-300'}`}>
+                                                    VAD: {isSpeaking ? 'SPEAKING' : 'IDLE'}
+                                                </div>
+                                            </div>
                                         </motion.div>
-                                    </div>
+                                        {peers.map((peer) => (
+                                            <MeetGridCard
+                                                key={peer?.peerID}
+                                                user={peer.user}
+                                                peer={peer?.peer}
+                                            />
+                                        ))}
+                                    </motion.div>
+                                </div>
 
-                                    <div className="w-full h-16 bg-darkBlue1 border-t-2 border-lightGray p-3">
-                                        <div className="flex items-center justify-between">
-                                            <div className="hidden lg:flex items-center gap-2 text-xs w-1/4 text-gray-400">
-                                                <span>VAD Sensitivity</span>
-                                                <input
-                                                    type="range" min="0.3" max="0.9" step="0.05"
-                                                    value={vadThreshold}
-                                                    onChange={(e) => setVadThreshold(parseFloat(e.target.value))}
-                                                    className="w-full"
-                                                    title="Adjust speech detection sensitivity"
-                                                />
-                                                <span>{vadThreshold.toFixed(2)}</span>
-                                            </div>
-                                            <div className="flex-grow flex justify-center gap-3">
-                                                <button
-                                                    className={`${micOn ? "bg-blue border-transparent" : "bg-slate-800/70 backdrop-blur border-gray"} border-2 p-2 cursor-pointer rounded-xl text-white text-xl relative transition-all duration-300`}
-                                                    onClick={() => {
-                                                        if (localStream.current) {
-                                                            const newMicState = !micOn;
-                                                            localStream.current.getAudioTracks()[0].enabled = newMicState;
-                                                            setMicOn(newMicState);
-                                                            if (vadRef.current) {
-                                                                newMicState ? vadRef.current.start() : vadRef.current.pause();
-                                                            }
-                                                        }
-                                                    }}
-                                                >
-                                                    {micOn ? <MicOnIcon /> : <MicOffIcon />}
-                                                </button>
-                                                <button
-                                                    className={`${videoActive ? "bg-blue border-transparent" : "bg-slate-800/70 backdrop-blur border-gray"} border-2 p-2 cursor-pointer rounded-xl text-white text-xl`}
-                                                    onClick={() => {
-                                                        if (localStream.current) {
-                                                            localStream.current.getVideoTracks()[0].enabled = !videoActive;
-                                                            setVideoActive(!videoActive);
-                                                        }
-                                                    }}
-                                                >
-                                                    {videoActive ? <VideoOnIcon /> : <VideoOffIcon />}
-                                                </button>
-                                                <button
-                                                    disabled={isSaving}
-                                                    onClick={isRecording ? handleStopRecording : handleStartRecording}
-                                                    className={`border-2 p-2 cursor-pointer rounded-xl text-white text-xl ${isRecording ? "bg-red-500 animate-pulse border-transparent" : "bg-slate-800/70 backdrop-blur border-gray"} disabled:opacity-50`}
-                                                >
-                                                    {isSaving ? "..." : <RecordIcon />}
-                                                </button>
-                                                <button
-                                                    className="py-2 px-4 flex items-center gap-2 rounded-lg bg-red-600"
-                                                    onClick={() => {
-                                                        navigate("/");
-                                                        window.location.reload();
-                                                    }}
-                                                >
-                                                    <CallEndIcon size={20} />
-                                                    <span className="hidden sm:block text-xs">End Call</span>
-                                                </button>
-                                            </div>
-                                            <div className="flex gap-2 w-1/4 justify-end">
-                                                <button
-                                                    className={`bg-slate-800/70 backdrop-blur border-gray border-2 p-2 cursor-pointer rounded-xl text-white text-xl`}
-                                                    onClick={() => setShare(true)}
-                                                >
-                                                    <ShareIcon size={22} />
-                                                </button>
-                                                <button
-                                                    className={`${showChat ? "bg-blue border-transparent" : "bg-slate-800/70 backdrop-blur border-gray"} border-2 p-2 cursor-pointer rounded-xl text-white text-xl`}
-                                                    onClick={() => {
-                                                        setshowChat(!showChat);
-                                                    }}
-                                                >
-                                                    <ChatIcon />
-                                                </button>
-                                            </div>
+                                <div className="w-full h-16 bg-darkBlue1 border-t-2 border-lightGray p-3">
+                                    <div className="flex items-center justify-between">
+                                        <div className="hidden lg:flex items-center gap-2 text-xs w-1/4 text-gray-400">
+                                            <span>VAD Sensitivity</span>
+                                            <input
+                                                type="range" min="0.3" max="0.9" step="0.05"
+                                                value={vadThreshold}
+                                                onChange={(e) => setVadThreshold(parseFloat(e.target.value))}
+                                                className="w-full"
+                                                title="Adjust speech detection sensitivity"
+                                            />
+                                            <span>{vadThreshold.toFixed(2)}</span>
+                                        </div>
+                                        <div className="flex-grow flex justify-center gap-3">
+                                            <button
+                                                className={`${micOn ? "bg-blue border-transparent" : "bg-slate-800/70 backdrop-blur border-gray"} border-2 p-2 cursor-pointer rounded-xl text-white text-xl relative transition-all duration-300`}
+                                                onClick={toggleMic}
+                                            >
+                                                {micOn ? <MicOnIcon /> : <MicOffIcon />}
+                                            </button>
+                                            <button
+                                                className={`${videoActive ? "bg-blue border-transparent" : "bg-slate-800/70 backdrop-blur border-gray"} border-2 p-2 cursor-pointer rounded-xl text-white text-xl`}
+                                                onClick={toggleVideo}
+                                            >
+                                                {videoActive ? <VideoOnIcon /> : <VideoOffIcon />}
+                                            </button>
+                                            <button
+                                                disabled={isSaving}
+                                                onClick={isRecording ? handleStopRecording : handleStartRecording}
+                                                className={`border-2 p-2 cursor-pointer rounded-xl text-white text-xl ${isRecording ? "bg-red-500 animate-pulse border-transparent" : "bg-slate-800/70 backdrop-blur border-gray"} disabled:opacity-50`}
+                                            >
+                                                {isSaving ? "..." : <RecordIcon />}
+                                            </button>
+                                            <button
+                                                className="py-2 px-4 flex items-center gap-2 rounded-lg bg-red-600 hover:bg-red-700 transition-colors"
+                                                onClick={handleLeaveRoom}
+                                            >
+                                                <CallEndIcon size={20} />
+                                                <span className="hidden sm:block text-xs">End Call</span>
+                                            </button>
+                                        </div>
+                                        <div className="flex gap-2 w-1/4 justify-end">
+                                            <button
+                                                className="bg-slate-800/70 backdrop-blur border-gray border-2 p-2 cursor-pointer rounded-xl text-white text-xl"
+                                                onClick={() => setShare(true)}
+                                            >
+                                                <ShareIcon size={22} />
+                                            </button>
+                                            <button
+                                                className={`${showChat ? "bg-blue border-transparent" : "bg-slate-800/70 backdrop-blur border-gray"} border-2 p-2 cursor-pointer rounded-xl text-white text-xl`}
+                                                onClick={() => setShowChat(!showChat)}
+                                            >
+                                                <ChatIcon />
+                                            </button>
                                         </div>
                                     </div>
-                                </motion.div>
-                                {showChat && (
-                                    <motion.div
-                                        layout
-                                        className="flex flex-col w-[30%] flex-shrink-0 border-l-2 border-lightGray"
+                                </div>
+                            </motion.div>
+                            
+                            {showChat && (
+                                <motion.div
+                                    layout
+                                    className="flex flex-col w-[30%] flex-shrink-0 border-l-2 border-lightGray"
+                                >
+                                    <div
+                                        className="flex-shrink-0 overflow-y-scroll"
+                                        style={{
+                                            height: "calc(100vh - 64px)",
+                                        }}
                                     >
-                                        <div
-                                            className="flex-shrink-0 overflow-y-scroll"
-                                            style={{
-                                                height: "calc(100vh - 64px)",
-                                            }}
-                                        >
-                                            <div className="flex flex-col bg-darkBlue1 w-full border-b-2 border-gray">
-                                                <div
-                                                    className="flex items-center w-full p-3 cursor-pointer"
-                                                    onClick={() => setParticpentsOpen(!particpentsOpen)}
-                                                >
-                                                    <div className="text-xl text-slate-400">
-                                                        <UsersIcon />
-                                                    </div>
-                                                    <div className="ml-2 text-sm font">Participants</div>
-                                                    <div
-                                                        className={`${particpentsOpen && "rotate-180"
-                                                            } transition-all  ml-auto text-lg`}
-                                                    >
-                                                        <DownIcon />
-                                                    </div>
+                                        <div className="flex flex-col bg-darkBlue1 w-full border-b-2 border-gray">
+                                            <div
+                                                className="flex items-center w-full p-3 cursor-pointer"
+                                                onClick={() => setParticipantsOpen(!participantsOpen)}
+                                            >
+                                                <div className="text-xl text-slate-400">
+                                                    <UsersIcon />
                                                 </div>
-                                                <motion.div
-                                                    layout
-                                                    className={`${particpentsOpen ? "block" : "hidden"
-                                                        } flex flex-col w-full mt-2 h-full max-h-[25vh] overflow-y-scroll gap-3 p-2`}
+                                                <div className="ml-2 text-sm font">Participants ({peers.length + 1})</div>
+                                                <div
+                                                    className={`${participantsOpen && "rotate-180"
+                                                        } transition-all ml-auto text-lg`}
                                                 >
-                                                    <AnimatePresence>
+                                                    <DownIcon />
+                                                </div>
+                                            </div>
+                                            <motion.div
+                                                layout
+                                                className={`${participantsOpen ? "block" : "hidden"
+                                                    } flex flex-col w-full mt-2 h-full max-h-[25vh] overflow-y-scroll gap-3 p-2`}
+                                            >
+                                                <AnimatePresence>
+                                                    <motion.div
+                                                        layout
+                                                        initial={{ x: 100, opacity: 0 }}
+                                                        animate={{ x: 0, opacity: 1 }}
+                                                        transition={{ duration: 0.08 }}
+                                                        exit={{ opacity: 0 }}
+                                                        whileHover={{ scale: 1.05 }}
+                                                        className="p-2 flex bg-gray items-center transition-all hover:bg-slate-900 gap-2 rounded-lg"
+                                                    >
+                                                        <img
+                                                            src={user.photoURL || "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"}
+                                                            alt={user.displayName || "Anonymous"}
+                                                            className="block w-8 h-8 aspect-square rounded-full mr-2"
+                                                        />
+                                                        <span className="font-medium text-sm">
+                                                            {user.displayName || "Anonymous"} (You)
+                                                        </span>
+                                                    </motion.div>
+                                                    {peers.map((peerData) => (
                                                         <motion.div
                                                             layout
                                                             initial={{ x: 100, opacity: 0 }}
                                                             animate={{ x: 0, opacity: 1 }}
                                                             transition={{ duration: 0.08 }}
                                                             exit={{ opacity: 0 }}
+                                                            key={peerData.peerID}
                                                             whileHover={{ scale: 1.05 }}
                                                             className="p-2 flex bg-gray items-center transition-all hover:bg-slate-900 gap-2 rounded-lg"
                                                         >
                                                             <img
-                                                                src={
-                                                                    user.photoURL ||
-                                                                    "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"
-                                                                }
-                                                                alt={user.displayName || "Anonymous"}
+                                                                src={peerData.user?.photoURL || "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"}
+                                                                alt={peerData.user?.name || "Anonymous"}
                                                                 className="block w-8 h-8 aspect-square rounded-full mr-2"
                                                             />
                                                             <span className="font-medium text-sm">
-                                                                {user.displayName || "Anonymous"}
+                                                                {peerData.user?.name || "Anonymous"}
                                                             </span>
                                                         </motion.div>
-                                                        {peers.map((peerData) => (
-                                                            <motion.div
-                                                                layout
-                                                                initial={{ x: 100, opacity: 0 }}
-                                                                animate={{ x: 0, opacity: 1 }}
-                                                                transition={{ duration: 0.08 }}
-                                                                exit={{ opacity: 0 }}
-                                                                key={peerData.peerID}
-                                                                whileHover={{ scale: 1.05 }}
-                                                                className="p-2 flex bg-gray items-center transition-all hover:bg-slate-900 gap-2 rounded-lg"
-                                                            >
-                                                                <img
-                                                                    src={
-                                                                        peerData.user.photoURL ||
-                                                                        "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"
-                                                                    }
-                                                                    alt={peerData.user.name || "Anonymous"}
-                                                                    className="block w-8 h-8 aspect-square rounded-full mr-2"
-                                                                />
-                                                                <span className="font-medium text-sm">
-                                                                    {peerData.user.name || "Anonymous"}
-                                                                </span>
-                                                            </motion.div>
-                                                        ))}
-                                                    </AnimatePresence>
-                                                </motion.div>
-                                            </div>
-
-                                            <div className="flex flex-col bg-darkBlue1 w-full border-b-2 border-t-2 border-lightGray">
-                                                <div className="flex items-center p-3 w-full">
-                                                    <div className="text-xl text-slate-400">
-                                                        <RecordIcon />
-                                                    </div>
-                                                    <div className="ml-2 text-sm font">Live Transcript</div>
-                                                </div>
-                                                <motion.div
-                                                    layout
-                                                    ref={transcriptScroll}
-                                                    className="p-3 flex flex-col gap-2 bg-darkBlue2 max-h-[30vh] overflow-y-auto"
-                                                >
-                                                    {transcriptLines.length > 0 ? (
-                                                        transcriptLines.map((line, index) => (
-                                                            <motion.p
-                                                                layout
-                                                                initial={{ opacity: 0, y: 10 }}
-                                                                animate={{ opacity: 1, y: 0 }}
-                                                                key={index}
-                                                                className="text-sm text-gray-200 leading-relaxed"
-                                                            >
-                                                                {line}
-                                                            </motion.p>
-                                                        ))
-                                                    ) : (
-                                                        <div className="text-center text-xs text-gray-500 italic p-4">
-                                                            Waiting for transcription...
-                                                        </div>
-                                                    )}
-                                                </motion.div>
-                                            </div>
-
-                                            <div className="h-full">
-                                                <div className="flex items-center bg-darkBlue1 p-3 w-full">
-                                                    <div className="text-xl text-slate-400">
-                                                        <ChatIcon />
-                                                    </div>
-                                                    <div className="ml-2 text-sm font">Chat</div>
-                                                </div>
-                                                <motion.div
-                                                    layout
-                                                    ref={chatScroll}
-                                                    className="p-3 h-full overflow-y-scroll flex flex-col gap-4"
-                                                >
-                                                    {msgs.map((msg, index) => (
-                                                        <motion.div
-                                                            layout
-                                                            initial={{ x: msg.send ? 100 : -100, opacity: 0 }}
-                                                            animate={{ x: 0, opacity: 1 }}
-                                                            transition={{ duration: 0.08 }}
-                                                            className={`flex gap-2 ${msg?.user.id === user?.uid
-                                                                    ? "flex-row-reverse"
-                                                                    : ""
-                                                                }`}
-                                                            key={index}
-                                                        >
-                                                            <img
-                                                                src={msg?.user.profilePic}
-                                                                alt={msg?.user.name}
-                                                                className="h-8 w-8 aspect-square rounded-full object-cover"
-                                                            />
-                                                            <p className="bg-darkBlue1 py-2 px-3 text-xs w-auto max-w-[87%] rounded-lg border-2 border-lightGray">
-                                                                {msg?.message}
-                                                            </p>
-                                                        </motion.div>
                                                     ))}
-                                                </motion.div>
-                                            </div>
+                                                </AnimatePresence>
+                                            </motion.div>
                                         </div>
-                                        <div className="w-full h-16 bg-darkBlue1 border-t-2 border-lightGray p-3">
-                                            <form onSubmit={sendMessage}>
-                                                <div className="flex items-center gap-2">
-                                                    <div className="relative flex-grow">
-                                                        <input
-                                                            type="text"
-                                                            value={msgText}
-                                                            onChange={(e) => setMsgText(e.target.value)}
-                                                            className="h-10 p-3 w-full text-sm text-darkBlue1 outline-none  rounded-lg"
-                                                            placeholder="Enter message.. "
-                                                        />
-                                                        {msgText && (
-                                                            <button
-                                                                type="button"
-                                                                onClick={() => setMsgText("")}
-                                                                className="bg-transparent text-darkBlue2 absolute top-0 right-0 text-lg cursor-pointer p-2  h-full"
-                                                            >
-                                                                <ClearIcon />
-                                                            </button>
-                                                        )}
-                                                    </div>
-                                                    <div>
-                                                        <button className="bg-blue h-10 text-md aspect-square rounded-lg flex items-center justify-center">
-                                                            <SendIcon />
-                                                        </button>
-                                                    </div>
+
+                                        <div className="flex flex-col bg-darkBlue1 w-full border-b-2 border-t-2 border-lightGray">
+                                            <div className="flex items-center p-3 w-full">
+                                                <div className="text-xl text-slate-400">
+                                                    <RecordIcon />
                                                 </div>
-                                            </form>
+                                                <div className="ml-2 text-sm font">Live Transcript</div>
+                                            </div>
+                                            <motion.div
+                                                layout
+                                                ref={transcriptScroll}
+                                                className="p-3 flex flex-col gap-2 bg-darkBlue2 max-h-[30vh] overflow-y-auto"
+                                            >
+                                                {transcriptLines.length > 0 ? (
+                                                    transcriptLines.map((line, index) => (
+                                                        <motion.p
+                                                            layout
+                                                            initial={{ opacity: 0, y: 10 }}
+                                                            animate={{ opacity: 1, y: 0 }}
+                                                            key={index}
+                                                            className="text-sm text-gray-200 leading-relaxed"
+                                                        >
+                                                            {line}
+                                                        </motion.p>
+                                                    ))
+                                                ) : (
+                                                    <div className="text-center text-xs text-gray-500 italic p-4">
+                                                        Waiting for transcription...
+                                                    </div>
+                                                )}
+                                            </motion.div>
                                         </div>
-                                    </motion.div>
-                                )}
-                            </motion.div>
-                        )
+
+                                        <div className="h-full">
+                                            <div className="flex items-center bg-darkBlue1 p-3 w-full">
+                                                <div className="text-xl text-slate-400">
+                                                    <ChatIcon />
+                                                </div>
+                                                <div className="ml-2 text-sm font">Chat</div>
+                                            </div>
+                                            <motion.div
+                                                layout
+                                                ref={chatScroll}
+                                                className="p-3 h-full overflow-y-scroll flex flex-col gap-4"
+                                            >
+                                                {msgs.map((msg, index) => (
+                                                    <motion.div
+                                                        layout
+                                                        initial={{ x: msg.send ? 100 : -100, opacity: 0 }}
+                                                        animate={{ x: 0, opacity: 1 }}
+                                                        transition={{ duration: 0.08 }}
+                                                        className={`flex gap-2 ${msg?.user.id === user?.uid
+                                                                ? "flex-row-reverse"
+                                                                : ""
+                                                            }`}
+                                                        key={index}
+                                                    >
+                                                        <img
+                                                            src={msg?.user.profilePic || "https://parkridgevet.com.au/wp-content/uploads/2020/11/Profile-300x300.png"}
+                                                            alt={msg?.user.name || "Anonymous"}
+                                                            className="h-8 w-8 aspect-square rounded-full object-cover"
+                                                        />
+                                                        <p className="bg-darkBlue1 py-2 px-3 text-xs w-auto max-w-[87%] rounded-lg border-2 border-lightGray">
+                                                            {msg?.message}
+                                                        </p>
+                                                    </motion.div>
+                                                ))}
+                                            </motion.div>
+                                        </div>
+                                    </div>
+                                    <div className="w-full h-16 bg-darkBlue1 border-t-2 border-lightGray p-3">
+                                        <form onSubmit={sendMessage}>
+                                            <div className="flex items-center gap-2">
+                                                <div className="relative flex-grow">
+                                                    <input
+                                                        type="text"
+                                                        value={msgText}
+                                                        onChange={(e) => setMsgText(e.target.value)}
+                                                        className="h-10 p-3 w-full text-sm text-darkBlue1 outline-none rounded-lg"
+                                                        placeholder="Enter message..."
+                                                    />
+                                                    {msgText && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setMsgText("")}
+                                                            className="bg-transparent text-darkBlue2 absolute top-0 right-0 text-lg cursor-pointer p-2 h-full"
+                                                        >
+                                                            <ClearIcon />
+                                                        </button>
+                                                    )}
+                                                </div>
+                                                <div>
+                                                    <button 
+                                                        type="submit"
+                                                        className="bg-blue h-10 text-md aspect-square rounded-lg flex items-center justify-center hover:bg-blue-600 transition-colors"
+                                                    >
+                                                        <SendIcon />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </form>
+                                    </div>
+                                </motion.div>
+                            )}
+                        </motion.div>
                     )}
                     {share && (
                         <div className="fixed flex items-center justify-center top-0 left-0 h-full w-full z-30 bg-slate-800/60 backdrop-blur">
-                            <div className="bg-white  p-3 rounded shadow shadow-white w-full mx-auto max-w-[500px] relative">
+                            <div className="bg-white p-3 rounded shadow shadow-white w-full mx-auto max-w-[500px] relative">
                                 <div className="flex items-center justify-between">
                                     <div className="text-slate-800">
                                         Share the link with someone to join the room
                                     </div>
-                                    <div>
+                                    <button onClick={() => setShare(false)}>
                                         <ClearIcon
                                             size={30}
                                             color="#121212"
-                                            onClick={() => setShare(false)}
                                         />
-                                    </div>
+                                    </button>
                                 </div>
-                                <div className="my-5 rounded flex items-center justify-between gap-2 text-sm text-slate-500 bg-slate-200 p-2 ">
+                                <div className="my-5 rounded flex items-center justify-between gap-2 text-sm text-slate-500 bg-slate-200 p-2">
                                     <LinkIcon />
                                     <div className="flex-grow">
                                         {window.location.href.length > 40
                                             ? `${window.location.href.slice(0, 37)}...`
                                             : window.location.href}
                                     </div>
-                                    <CopyToClipboardIcon
-                                        className="cursor-pointer"
-                                        onClick={() =>
-                                            navigator.clipboard.writeText(window.location.href)
-                                        }
-                                    />
+                                    <button onClick={copyToClipboard}>
+                                        <CopyToClipboardIcon className="cursor-pointer" />
+                                    </button>
                                 </div>
                                 <div className="flex w-full aspect-square h-full justify-center items-center">
                                     <QRCode
@@ -728,9 +851,9 @@ const Room = () => {
                     )}
                 </AnimatePresence>
             ) : (
-                <div className="h-full bg-darkBlue2 flex items-center justify-center">
+                <div className="h-screen bg-darkBlue2 flex items-center justify-center">
                     <button
-                        className="flex items-center gap-2 p-1 pr-3 rounded text-white font-bold bg-blue transition-all"
+                        className="flex items-center gap-2 p-1 pr-3 rounded text-white font-bold bg-blue transition-all hover:bg-blue-600"
                         onClick={login}
                     >
                         <div className="p-2 bg-white rounded">
