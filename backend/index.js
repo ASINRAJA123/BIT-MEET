@@ -61,6 +61,11 @@ app.post('/api/upload-audio', upload.single('audio'), (req, res) => {
     });
 });
 
+app.get('/ping', (req, res) => {
+  res.status(200).send("pong");
+});
+
+
 app.get('/api/transcript/:roomID', async (req, res) => {
     const { roomID } = req.params;
     const transcriptFilePath = path.join(transcriptsDir, roomID, 'transcript.txt');
